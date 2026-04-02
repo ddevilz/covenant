@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import ast
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+_NETWORK_MODULES = {"requests", "httpx", "aiohttp", "urllib", "urllib3"}
+_LLM_MODULES = {"anthropic", "openai", "litellm"}
+_FS_PATTERN = re.compile(
+    r'\bopen\(|Path\(.*?\)\.(read_text|write_text)|os\.path\.'
+)
+
+
+@dataclass
+class StaticAnalysisResult:
+    """Result of static analysis of an agent source file.
+
+    Args:
+        detected_runtime: "python", "typescript", or "any".
+        agent_functions: Top-level async function names.
+        detected_tools: Calls to known tool-shaped functions (best effort).
+        has_network: True if network imports detected.
+        has_filesystem: True if filesystem usage detected.
+        has_llm: True if LLM client imports detected.
+        imported_modules: All top-level imported module names.
+        source_path: Path to the analyzed file.
+    """
+
+    detected_runtime: str
+    agent_functions: list[str]
+    detected_tools: list[str]
+    has_network: bool
+    has_filesystem: bool
+    has_llm: bool
+    imported_modules: list[str]
+    source_path: Path
+
+
+def analyze(path: Path) -> StaticAnalysisResult:
+    """Statically analyze an agent source file.
+
+    Python: full AST analysis.
+    TypeScript: regex-based import analysis.
+
+    Args:
+        path: Path to a .py or .ts source file.
+
+    Returns:
+        StaticAnalysisResult with detected features.
+    """
+    source = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".py":
+        return _analyze_python(source, path)
+    return _analyze_typescript(source, path)
+
+
+def _analyze_python(source: str, path: Path) -> StaticAnalysisResult:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return StaticAnalysisResult(
+            detected_runtime="python",
+            agent_functions=[],
+            detected_tools=[],
+            has_network=False,
+            has_filesystem=False,
+            has_llm=False,
+            imported_modules=[],
+            source_path=path,
+        )
+
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module.split(".")[0])
+
+    # Top-level async functions only (col_offset == 0)
+    async_fns = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.col_offset == 0
+    ]
+
+    imports_set = set(imports)
+    has_llm = bool(imports_set & _LLM_MODULES)
+    has_network = has_llm or bool(imports_set & _NETWORK_MODULES)
+    has_filesystem = bool(_FS_PATTERN.search(source))
+
+    return StaticAnalysisResult(
+        detected_runtime="python",
+        agent_functions=async_fns,
+        detected_tools=[],
+        has_network=has_network,
+        has_filesystem=has_filesystem,
+        has_llm=has_llm,
+        imported_modules=sorted(imports_set),
+        source_path=path,
+    )
+
+
+def _analyze_typescript(source: str, path: Path) -> StaticAnalysisResult:
+    import_pattern = re.compile(r'import\s+.*?\s+from\s+[\'"]([^\'"]+)[\'"]')
+    modules = [
+        m.lstrip("@").split("/")[0]
+        for m in import_pattern.findall(source)
+    ]
+    modules_set = set(modules)
+
+    has_llm = bool(modules_set & {"anthropic", "openai"})
+    has_network = has_llm or bool(modules_set & {"axios", "node-fetch", "undici"})
+    has_filesystem = bool(
+        re.search(r'\bfs\b|\breadFileSync\b|\bwriteFileSync\b', source)
+    )
+    async_fns = re.findall(r'(?:export\s+)?async\s+function\s+(\w+)', source)
+
+    return StaticAnalysisResult(
+        detected_runtime="typescript",
+        agent_functions=async_fns,
+        detected_tools=[],
+        has_network=has_network,
+        has_filesystem=has_filesystem,
+        has_llm=has_llm,
+        imported_modules=sorted(modules_set),
+        source_path=path,
+    )
+
+
+def draft_spec(result: StaticAnalysisResult, name: str) -> dict[str, Any]:
+    """Produce a draft spec dict from static analysis results.
+
+    capabilities.tools is intentionally left empty -- the user must fill it in.
+    This forces intentional review of the most important field in the spec.
+
+    Args:
+        result: StaticAnalysisResult from analyze().
+        name: kebab-case agent name derived from the source filename.
+
+    Returns:
+        Raw spec dict suitable for YAML serialization.
+    """
+    spec: dict[str, Any] = {
+        "covenant": "1.0",
+        "agent": {
+            "name": name,
+            "version": "0.1.0",
+            "runtime": result.detected_runtime,
+        },
+        "capabilities": {
+            "tools": [],  # TODO: fill in your tool names
+        },
+        "constraints": {
+            "budget": {"max_cost_usd": 0.10},
+        },
+        "metadata": {
+            "description": "Generated by covenant generate -- review before publishing",
+            "llm_enhanced": False,
+        },
+    }
+
+    if result.has_network:
+        spec["constraints"]["network"] = {"egress": True}
+
+    if result.has_filesystem:
+        spec["constraints"]["filesystem"] = {"read": ["**/*"], "write": []}
+
+    return spec
+
+
+def _merge_llm_result(
+    draft: dict[str, Any], llm_result: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge LLM-suggested fields into a draft spec dict.
+
+    Only fills fields that static analysis cannot determine reliably.
+    Never overwrites runtime, network, or filesystem fields.
+
+    Args:
+        draft: Draft spec dict from draft_spec().
+        llm_result: Parsed LLM JSON response.
+
+    Returns:
+        Merged spec dict with llm_enhanced: true set in metadata.
+    """
+    merged = dict(draft)
+
+    if description := llm_result.get("description"):
+        merged.setdefault("metadata", {})["description"] = description
+
+    if tools := llm_result.get("tools"):
+        merged["capabilities"] = dict(merged.get("capabilities", {}))
+        merged["capabilities"]["tools"] = tools
+
+    if invariants := llm_result.get("invariants"):
+        merged["invariants"] = invariants
+
+    merged.setdefault("metadata", {})["llm_enhanced"] = True
+    return merged
+
+
+def enhance_with_llm(draft: dict[str, Any], source_text: str) -> dict[str, Any]:
+    """Run LLM enhancement phase against an agent source file.
+
+    Requires COVENANT_LLM_KEY env var. Optional env vars:
+      COVENANT_LLM_BASE_URL -- provider base URL (default: api.openai.com)
+      COVENANT_LLM_MODEL    -- model id (default: gpt-4o-mini)
+
+    The LLM returns JSON only (no markdown, no preamble). Any accidental
+    markdown fences are stripped before parsing.
+
+    Args:
+        draft: Draft spec dict from draft_spec().
+        source_text: Full source code of the agent file.
+
+    Returns:
+        Merged spec dict with llm_enhanced: true.
+    """
+    import json
+    import os
+
+    from openai import OpenAI
+
+    api_key = os.environ["COVENANT_LLM_KEY"]
+    base_url = os.environ.get("COVENANT_LLM_BASE_URL")
+    model = os.environ.get("COVENANT_LLM_MODEL", "gpt-4o-mini")
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    system = (
+        "You analyze AI agent source code and return a JSON object describing "
+        "the agent's behavioral contract. Return ONLY valid JSON -- no preamble, "
+        "no markdown fences. JSON must have exactly these fields: "
+        '{"description": "one sentence", "tools": ["tool_name"], '
+        '"invariants": [{"id": "INV-001", "description": "...", '
+        '"assert": "...", "severity": "error"}]}'
+    )
+    user = f"Agent source code:\n\n{source_text}"
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=1000,
+    )
+    raw = response.choices[0].message.content or ""
+
+    # Strip accidental markdown fences (belt-and-suspenders)
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    raw = re.sub(r"\s*```$", "", raw)
+
+    llm_result = json.loads(raw)
+    return _merge_llm_result(draft, llm_result)

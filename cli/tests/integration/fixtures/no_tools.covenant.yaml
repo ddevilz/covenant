@@ -1,0 +1,10 @@
+covenant: "1.0"
+agent:
+  name: code-reviewer
+  version: "1.0.0"
+  runtime: python
+capabilities:
+  tools: []
+constraints:
+  budget:
+    max_cost_usd: 0.10

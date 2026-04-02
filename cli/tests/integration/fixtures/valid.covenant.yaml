@@ -1,0 +1,14 @@
+covenant: "1.0"
+agent:
+  name: code-reviewer
+  version: "1.0.0"
+  runtime: python
+capabilities:
+  tools:
+    - read_files
+    - call_llm
+constraints:
+  budget:
+    max_cost_usd: 0.10
+metadata:
+  description: Reviews code for correctness and style
