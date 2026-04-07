@@ -1,0 +1,289 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://covenant.dev/schema/1.0/covenant.schema.json",
+  "version": "1.0",
+  "title": "Covenant",
+  "description": "Behavioral contract spec for AI agents",
+  "type": "object",
+  "required": ["covenant", "agent", "capabilities", "constraints"],
+  "additionalProperties": false,
+
+  "properties": {
+
+    "covenant": {
+      "type": "string",
+      "description": "Spec version this contract is written against",
+      "enum": ["1.0"]
+    },
+
+    "agent": {
+      "type": "object",
+      "required": ["name", "version", "runtime"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$",
+          "description": "Machine-readable agent id, kebab-case"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$",
+          "description": "Semver string — major must bump on any breaking change"
+        },
+        "runtime": {
+          "type": "string",
+          "enum": ["python", "typescript", "any"]
+        },
+        "entrypoint": {
+          "type": "string",
+          "description": "Relative path to the agent entrypoint file"
+        }
+      }
+    },
+
+    "capabilities": {
+      "type": "object",
+      "required": ["tools"],
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "description": "Allowlist of tool names the agent may call"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["provider", "model"],
+            "additionalProperties": false,
+            "properties": {
+              "provider": { "type": "string" },
+              "model": {
+                "type": "string",
+                "description": "Exact model id or glob — e.g. claude-sonnet-4-*"
+              },
+              "max_tokens": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "external_services": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "description": "Named external services the agent may contact. Empty means none."
+        }
+      }
+    },
+
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deny_tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true,
+          "description": "Hard deny regardless of capabilities list"
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "egress": {
+              "oneOf": [
+                { "type": "boolean" },
+                { "type": "string", "enum": ["scoped"] }
+              ],
+              "description": "false = no outbound network. true = unrestricted. scoped = allowed_domains only."
+            },
+            "allowed_domains": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Only meaningful when egress is scoped"
+            }
+          }
+        },
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Glob patterns the agent may read"
+            },
+            "write": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Glob patterns the agent may write. Empty means no writes."
+            }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "file_patterns": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "max_file_size_kb": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_calls_per_invocation": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Hard cap on total tool calls per single agent invocation"
+            }
+          }
+        },
+        "budget": {
+          "type": "object",
+          "required": ["max_cost_usd"],
+          "additionalProperties": false,
+          "properties": {
+            "max_cost_usd": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Hard cost ceiling per invocation in USD"
+            }
+          }
+        }
+      }
+    },
+
+    "invariants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "assert", "severity"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^INV-[0-9]{3,}$"
+          },
+          "description": { "type": "string" },
+          "assert": {
+            "type": "string",
+            "description": "Restricted Python expression evaluated against EnforcementContext"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["error", "warn"],
+            "description": "error raises CovenantViolationError. warn emits audit event only."
+          }
+        }
+      }
+    },
+
+    "protocols": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "type": "object",
+          "required": ["schema"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "type": "string",
+              "description": "Relative path to JSON Schema file for agent input"
+            },
+            "required": { "type": "boolean", "default": true }
+          }
+        },
+        "output": {
+          "type": "object",
+          "required": ["schema"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "type": "string",
+              "description": "Relative path to JSON Schema file for agent output"
+            },
+            "required": { "type": "boolean", "default": true }
+          }
+        },
+        "errors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "type": "string",
+              "description": "Relative path to JSON Schema for structured error envelope"
+            }
+          }
+        }
+      }
+    },
+
+    "slo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latency_p95_ms": { "type": "integer", "minimum": 1 },
+        "latency_p99_ms": { "type": "integer", "minimum": 1 },
+        "cost_per_call_usd_max": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "error_rate_max_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "calls_per_minute_max": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "author": { "type": "string" },
+        "signed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "algorithm": {
+          "type": "string",
+          "enum": ["Ed25519"],
+          "description": "Only Ed25519 is accepted. No other algorithm will be verified."
+        },
+        "public_key": {
+          "type": "string",
+          "description": "Base64url-encoded Ed25519 public key"
+        },
+        "signature": {
+          "type": "string",
+          "description": "Base64url-encoded signature over SHA256 of canonical YAML"
+        }
+      }
+    },
+
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "homepage": { "type": "string", "format": "uri" },
+        "license": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
